@@ -9,7 +9,9 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media.Imaging;
 using System.Xml;
+using System.Text.RegularExpressions;
 using Assembly.Helpers;
 using Assembly.Metro.Controls.PageTemplates.Games.Components;
 using Assembly.Metro.Controls.PageTemplates.Games.Components.Editors;
@@ -32,6 +34,7 @@ using Microsoft.Win32;
 using Newtonsoft.Json;
 using XBDMCommunicator;
 using Blamite.Blam.ThirdGen;
+using Blamite.Blam.ThirdGen.BLF;
 
 namespace Assembly.Metro.Controls.PageTemplates.Games
 {
@@ -56,6 +59,8 @@ namespace Assembly.Metro.Controls.PageTemplates.Games
 		private readonly ObservableCollection<LanguageEntry> _languages = new ObservableCollection<LanguageEntry>();
 		private readonly LayoutDocument _tab;
 
+        private static Blamite.Serialization.MapInfo.EngineDatabase _defaultMapInfoDatabase = App.AssemblyStorage.AssemblySettings.DefaultMapInfoDatabase;
+
 		private readonly Settings.TagSort _tagSorting;
 		private TagHierarchy _allTags = new TagHierarchy();
 		private EngineDescription _buildInfo;
@@ -68,6 +73,7 @@ namespace Assembly.Metro.Controls.PageTemplates.Games
 		private List<TagEntry> _tagEntries = new List<TagEntry>();
 		private Settings.TagOpenMode _tagOpenMode;
 		private TagHierarchy _visibleTags = new TagHierarchy();
+        private ObservableCollection<ResourceCacheInfo> _resourceCacheDirectories;
 
 		/// <summary>
 		///     New Instance of the Halo Map Location
@@ -95,10 +101,12 @@ namespace Assembly.Metro.Controls.PageTemplates.Games
 
 			tabScripts.Visibility = Visibility.Collapsed;
 
-			// Read Settings
+            // Read Settings
 			cbShowEmptyTags.IsChecked = App.AssemblyStorage.AssemblySettings.HalomapShowEmptyClasses;
 			cbShowBookmarkedTagsOnly.IsChecked = App.AssemblyStorage.AssemblySettings.HalomapOnlyShowBookmarkedTags;
 			cbTabOpenMode.SelectedIndex = (int) App.AssemblyStorage.AssemblySettings.HalomapTagOpenMode;
+            
+            _resourceCacheDirectories = App.AssemblyStorage.AssemblySettings.HalomapResourceCachePaths;
 			App.AssemblyStorage.AssemblySettings.PropertyChanged += SettingsChanged;
 
 			var initalLoadBackgroundWorker = new BackgroundWorker();
@@ -141,7 +149,99 @@ namespace Assembly.Metro.Controls.PageTemplates.Games
 			InitalizeMap();
 		}
 
-		public void InitalizeMap()
+        private void LoadAdditionalMapInfo()
+        {
+            string cachePath = _resourceCacheDirectories.Where(r => r.EngineName == _buildInfo.Name)
+                                                        .Select(r => r.ResourceCachePath)
+                                                        .FirstOrDefault();
+            if (!String.IsNullOrEmpty(cachePath))
+            {
+                switch (_cacheFile.Engine)
+                {
+                    case EngineType.ThirdGeneration:
+                        LoadThridGenerationMapInfo(cachePath);
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+
+        private void LoadThridGenerationMapInfo(string cachePath)
+        {
+            string mapInfoFileName = _cacheFile.InternalName + ".mapinfo";
+            string mapInfoPath = Path.Combine(cachePath, "info", mapInfoFileName);
+
+            if (File.Exists(mapInfoPath))
+            {
+                MapInfo mapInfo = new MapInfo(mapInfoPath, _defaultMapInfoDatabase);
+                Dispatcher.Invoke(() =>
+                {
+                    lblMapName.Text = mapInfo.MapInformation.MapNames.FirstOrDefault();
+                    textMapDescription.Text = mapInfo.MapInformation.MapDescriptions.FirstOrDefault();
+                });
+            }
+
+            string mapImageFileName;
+            if (_buildInfo.Name == "Halo 3")
+            {
+                switch (_cacheFile.Type)
+                {
+                    case CacheFileType.SinglePlayer:
+                        Match mapNumberMatch = Regex.Match(_cacheFile.InternalName, @"(\d+)_.+");
+                        string mapNumber = mapNumberMatch.Groups[1]?.Value;
+                        mapImageFileName = $"c_{mapNumber}.blf";
+                        break;
+                    case CacheFileType.Multiplayer:
+                        mapImageFileName = $"m_{_cacheFile.InternalName}.blf";
+                        break;
+                    default:
+                        mapImageFileName = $"{_cacheFile.InternalName}.blf";
+                        break;
+                }
+            }
+            else if (_buildInfo.Name == "Halo 3: ODST")
+            {
+                mapImageFileName = $"c_{_cacheFile.InternalName}.blf";
+            }
+            else if (_buildInfo.Name == "Halo 4")
+            {
+                Match mapNumberMatch = Regex.Match(_cacheFile.InternalName, @"m(\d+).*");
+                string mapNumber = mapNumberMatch.Groups[1]?.Value;
+
+                // add leading zeros
+                while (mapNumber.Length < 3)
+                    mapNumber = "0" + mapNumber;
+
+                mapImageFileName = $"c_{mapNumber}_lobby.blf";
+            }
+            else
+            {
+                mapImageFileName = $"{_cacheFile.InternalName}.blf";
+            }
+
+            string mapImagePath = Path.Combine(cachePath, "images", mapImageFileName);
+
+            if (File.Exists(mapImagePath))
+            {
+                PureBLF mapImageBLF = new PureBLF(mapImagePath);
+                byte[] imageChunk = mapImageBLF.BLFChunks[1].ChunkData;
+
+                Dispatcher.Invoke(() =>
+                {
+                    BitmapImage mapImage = new BitmapImage();
+                    mapImage.BeginInit();
+                    mapImage.StreamSource = new MemoryStream(imageChunk, 8, imageChunk.Length - 8);
+                    mapImage.EndInit();
+
+                    imageMap.Source = mapImage;
+                    imageMap.MaxWidth = mapImage.Width;
+                    imageMap.MaxHeight = mapImage.Height;
+                });
+            }
+        }
+
+        public void InitalizeMap()
 		{
 			using (FileStream fileStream = File.OpenRead(_cacheLocation))
 			{
@@ -150,7 +250,6 @@ namespace Assembly.Metro.Controls.PageTemplates.Games
 				{
 					_cacheFile = CacheFileLoader.LoadCacheFile(reader, App.AssemblyStorage.AssemblySettings.DefaultDatabase,
 						out _buildInfo);
-
 #if DEBUG
 					Dispatcher.Invoke(new Action(() => contentTabs.Items.Add(new CloseableTabItem
 					{
@@ -256,6 +355,7 @@ namespace Assembly.Metro.Controls.PageTemplates.Games
 				LoadTags();
 				LoadLocales();
 				LoadScripts();
+                LoadAdditionalMapInfo();
 			}
 		}
 
